@@ -4,10 +4,11 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 from mlxtend.frequent_patterns import apriori, association_rules
-from mlxtend.preprocessing import TransactionEncoder
 import warnings
+
+# Matikan warning agar tampilan bersih
 warnings.filterwarnings('ignore')
 
 # =============================================
@@ -20,186 +21,185 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS untuk mempercantik
+st.markdown("""
+<style>
+    .metric-card {background-color: #f0f2f6; border-radius: 10px; padding: 15px; margin: 10px 0;}
+    .stExpander {border: 1px solid #e0e0e0; border-radius: 5px;}
+</style>
+""", unsafe_allow_html=True)
+
 # =============================================
-# FUNGSI PREPROCESSING DATA
+# 1. FUNGSI LOAD & FEATURE ENGINEERING 
 # =============================================
 @st.cache_data
-def load_and_preprocess_data(file):
-    """Memuat dan memproses data e-commerce"""
+def load_and_process_data(file):
+    """
+    Memuat data dan melakukan Feature Engineering persis seperti Notebook.
+    """
+    # 1. Load Data
+    try:
+        df = pd.read_csv(file, encoding='ISO-8859-1')
+    except:
+        df = pd.read_excel(file)
     
-    # Load data
-    df = pd.read_csv(file, encoding='ISO-8859-1')
-    
-    # Data cleaning
+    # Bersihkan data kosong
     df = df.dropna(subset=['CustomerID', 'Description'])
-    df = df[df['Quantity'] > 0]
-    df = df[df['UnitPrice'] > 0]
-    df = df[~df['InvoiceNo'].str.contains('C', na=False)]  # Hapus return
+    df['InvoiceNo'] = df['InvoiceNo'].astype(str)
     
-    # Feature engineering
+    # Hitung TotalPrice per baris
     df['TotalPrice'] = df['Quantity'] * df['UnitPrice']
-    df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'])
     
-    return df
-
-@st.cache_data
-def calculate_product_metrics(df):
-    """Menghitung metrik untuk setiap produk"""
+    # 2. Tandai Retur (Invoice diawali 'C')
+    df['IsReturn'] = df['InvoiceNo'].str.upper().str.startswith('C')
     
-    # Agregasi per produk
-    product_metrics = df.groupby(['StockCode', 'Description']).agg({
-        'Quantity': 'sum',
-        'TotalPrice': 'sum',
-        'InvoiceNo': 'nunique',
-        'CustomerID': 'nunique',
-        'UnitPrice': 'mean'
-    }).reset_index()
+    # 3. Agregasi per Produk (StockCode)
+    # Kita butuh: Total_Sales, Frequency, Revenue, Return_Rate
+    df_products = df.groupby(['StockCode', 'Description']).agg(
+        Total_Sales=('Quantity', lambda x: x[x > 0].sum()), # Hanya quantity positif
+        Frequency=('InvoiceNo', 'nunique'),                 # Jumlah invoice unik
+        Revenue=('TotalPrice', 'sum'),                      # Total pendapatan
+        Total_Transactions=('InvoiceNo', 'count'),          # Total baris record
+        Return_Count=('IsReturn', 'sum')                    # Jumlah kejadian retur
+    ).reset_index()
     
-    product_metrics.columns = ['StockCode', 'Description', 'TotalQuantity', 
-                                'TotalRevenue', 'OrderFrequency', 
-                                'UniqueCustomers', 'AvgPrice']
+    # 4. Hitung Rasio Retur
+    df_products['Return_Rate'] = df_products['Return_Count'] / df_products['Total_Transactions']
     
-    # Hitung margin (asumsi 30% dari harga)
-    product_metrics['ProfitMargin'] = product_metrics['AvgPrice'] * 0.3
-    product_metrics['TotalProfit'] = product_metrics['TotalQuantity'] * product_metrics['ProfitMargin']
+    # 5. Filter: Hanya produk yang pernah terjual (Sales > 0)
+    df_products = df_products[df_products['Total_Sales'] > 0]
     
-    # Hitung tingkat retur (simulasi berdasarkan data historis)
-    # Di sini kita simulasi return rate berdasarkan distribusi normal
-    np.random.seed(42)
-    product_metrics['ReturnRate'] = np.random.normal(5, 2, len(product_metrics))
-    product_metrics['ReturnRate'] = product_metrics['ReturnRate'].clip(0, 15)
+    # Filter tambahan untuk kestabilan statistik (Opsional, agar tidak ada produk terjual 1x)
+    # Di notebook kita pakai semua > 0, tapi untuk aplikasi sebaiknya minimal 3-5 kali terjual agar valid
+    df_products = df_products[df_products['Frequency'] >= 3]
     
-    # Ambil top 100 produk berdasarkan revenue
-    product_metrics = product_metrics.nlargest(100, 'TotalRevenue')
-    
-    return product_metrics
+    return df, df_products
 
 # =============================================
-# FUNGSI AHP (ANALYTIC HIERARCHY PROCESS)
-# =============================================
-def normalize_criteria(df, criteria_columns):
-    """Normalisasi kriteria untuk AHP"""
-    normalized_df = df[criteria_columns].copy()
-    
-    for col in criteria_columns:
-        if col == 'ReturnRate':
-            # Return rate: semakin rendah semakin baik (benefit negatif)
-            normalized_df[col] = 1 / (df[col] + 1)
-        else:
-            # Kriteria lain: semakin tinggi semakin baik
-            normalized_df[col] = df[col]
-    
-    # Normalisasi ke skala 0-1
-    scaler = StandardScaler()
-    normalized_values = scaler.fit_transform(normalized_df)
-    
-    # Konversi ke skala positif 0-1
-    for i, col in enumerate(criteria_columns):
-        min_val = normalized_values[:, i].min()
-        max_val = normalized_values[:, i].max()
-        if max_val - min_val > 0:
-            normalized_df[col] = (normalized_values[:, i] - min_val) / (max_val - min_val)
-        else:
-            normalized_df[col] = 0
-    
-    return normalized_df
-
-# =============================================
-# FUNGSI TOPSIS
-# =============================================
-def calculate_topsis(df, weights):
-    """Implementasi metode TOPSIS"""
-    
-    criteria_columns = ['TotalRevenue', 'OrderFrequency', 'TotalProfit', 'ReturnRate']
-    
-    # Normalisasi kriteria
-    normalized = normalize_criteria(df, criteria_columns)
-    
-    # Weighted normalized decision matrix
-    weighted_normalized = normalized.copy()
-    weighted_normalized['TotalRevenue'] *= weights['TotalRevenue']
-    weighted_normalized['OrderFrequency'] *= weights['OrderFrequency']
-    weighted_normalized['TotalProfit'] *= weights['TotalProfit']
-    weighted_normalized['ReturnRate'] *= weights['ReturnRate']
-    
-    # Ideal best (A+) and worst (A-) solutions
-    ideal_best = weighted_normalized.max()
-    ideal_worst = weighted_normalized.min()
-    
-    # Euclidean distance to ideal best and worst
-    distance_to_best = np.sqrt(((weighted_normalized - ideal_best) ** 2).sum(axis=1))
-    distance_to_worst = np.sqrt(((weighted_normalized - ideal_worst) ** 2).sum(axis=1))
-    
-    # TOPSIS score
-    topsis_score = distance_to_worst / (distance_to_best + distance_to_worst)
-    
-    # Tambahkan score ke dataframe
-    result_df = df.copy()
-    result_df['TOPSIS_Score'] = topsis_score
-    result_df = result_df.sort_values('TOPSIS_Score', ascending=False)
-    result_df['Rank'] = range(1, len(result_df) + 1)
-    
-    return result_df
-
-# =============================================
-# FUNGSI ASSOCIATION RULE MINING (APRIORI)
-# =============================================
-@st.cache_data
-def perform_association_analysis(df, min_support=0.01, min_confidence=0.3):
-    """Melakukan analisis association rules dengan Apriori"""
-    
-    # Buat transaction basket
-    basket = df.groupby(['InvoiceNo', 'StockCode'])['Quantity'].sum().unstack().fillna(0)
-    
-    # Convert ke binary (1 jika dibeli, 0 jika tidak)
-    basket_binary = basket.applymap(lambda x: 1 if x > 0 else 0)
-    
-    # Jalankan Apriori algorithm
-    frequent_itemsets = apriori(basket_binary, min_support=min_support, use_colnames=True)
-    
-    if len(frequent_itemsets) > 0:
-        # Generate association rules
-        rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_confidence)
-        rules = rules.sort_values('lift', ascending=False)
-        return rules, frequent_itemsets
-    else:
-        return pd.DataFrame(), pd.DataFrame()
-
-# =============================================
-# FUNGSI K-MEANS CLUSTERING
+# 2. FUNGSI CLUSTERING (Sesuai Notebook: K-Means + Auto Label)
 # =============================================
 @st.cache_data
 def perform_clustering(df, n_clusters=3):
-    """Melakukan K-Means clustering pada produk"""
+    """
+    K-Means dengan MinMaxScaler dan Auto-Labeling (Low/Average/High).
+    """
+    # Copy data agar aman
+    df_clus = df.copy()
     
-    # Pilih fitur untuk clustering
-    features = df[['TotalRevenue', 'OrderFrequency', 'TotalProfit', 'ReturnRate']].copy()
+    # Ambil fitur numerik
+    features = df_clus[['Total_Sales', 'Frequency', 'Revenue', 'Return_Rate']]
     
-    # Normalisasi
-    scaler = StandardScaler()
+    # Normalisasi (MinMax sesuai notebook)
+    scaler = MinMaxScaler()
     features_scaled = scaler.fit_transform(features)
     
-    # K-Means clustering
+    # Jalankan K-Means
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    df['Cluster'] = kmeans.fit_predict(features_scaled)
+    df_clus['Cluster_ID'] = kmeans.fit_predict(features_scaled)
     
-    # Label cluster
-    cluster_labels = {
-        0: 'High Performer',
-        1: 'Medium Performer',
-        2: 'Low Performer'
+    # --- AUTO-LABELING ---
+    # Hitung rata-rata Revenue per Cluster untuk tahu mana yang "Sultan"
+    cluster_stats = df_clus.groupby('Cluster_ID')['Revenue'].mean().sort_values()
+    
+    label_mapping = {
+        cluster_stats.index[0]: 'Low Performing',
+        cluster_stats.index[1]: 'Average Performing',
+        cluster_stats.index[2]: 'High Performing'
     }
     
-    # Urutkan cluster berdasarkan rata-rata revenue
-    cluster_means = df.groupby('Cluster')['TotalRevenue'].mean().sort_values(ascending=False)
-    cluster_mapping = {old: new for new, old in enumerate(cluster_means.index)}
-    df['Cluster'] = df['Cluster'].map(cluster_mapping)
-    df['ClusterLabel'] = df['Cluster'].map(cluster_labels)
+    df_clus['Cluster_Label'] = df_clus['Cluster_ID'].map(label_mapping)
     
-    return df, kmeans
+    return df_clus
 
 # =============================================
-# MAIN APPLICATION
+# 3. FUNGSI TOPSIS (Sesuai Notebook)
+# =============================================
+def calculate_topsis(df, weights_dict):
+    """
+    Menghitung skor TOPSIS menggunakan bobot (dari Slider).
+    """
+    final_df = df.copy()
+    
+    # Kolom kriteria yang dipakai
+    criteria = ['Total_Sales', 'Frequency', 'Revenue', 'Return_Rate']
+    data_mtx = final_df[criteria]
+    
+    # 1. Normalisasi Vektor (x / sqrt(sum(x^2)))
+    # Tambah epsilon kecil agar tidak divide by zero jika data kosong
+    norm_mtx = data_mtx / np.sqrt((data_mtx**2).sum() + 1e-9)
+    
+    # 2. Kalikan dengan Bobot (dari Slider user)
+    for col in criteria:
+        norm_mtx[col] = norm_mtx[col] * weights_dict[col]
+        
+    # 3. Tentukan Solusi Ideal
+    # Benefit: Sales, Freq, Revenue (Max is better)
+    # Cost: ReturnRate (Min is better)
+    ideal_pos = {
+        'Total_Sales': norm_mtx['Total_Sales'].max(),
+        'Frequency': norm_mtx['Frequency'].max(),
+        'Revenue': norm_mtx['Revenue'].max(),
+        'Return_Rate': norm_mtx['Return_Rate'].min() # Cost
+    }
+    
+    ideal_neg = {
+        'Total_Sales': norm_mtx['Total_Sales'].min(),
+        'Frequency': norm_mtx['Frequency'].min(),
+        'Revenue': norm_mtx['Revenue'].min(),
+        'Return_Rate': norm_mtx['Return_Rate'].max()
+    }
+    
+    # 4. Hitung Jarak & Skor
+    dist_pos = np.sqrt(((norm_mtx - pd.Series(ideal_pos))**2).sum(axis=1))
+    dist_neg = np.sqrt(((norm_mtx - pd.Series(ideal_neg))**2).sum(axis=1))
+    
+    final_df['TOPSIS_Score'] = dist_neg / (dist_pos + dist_neg + 1e-9)
+    final_df['Rank'] = final_df['TOPSIS_Score'].rank(ascending=False)
+    
+    return final_df.sort_values('Rank')
+
+# =============================================
+# 4. FUNGSI ASSOCIATION RULE (Apriori)
+# =============================================
+@st.cache_data
+def get_bundling_rules(df_raw, min_support=0.01, min_lift=1.2):
+    """
+    Market Basket Analysis untuk bundling.
+    Filter 'United Kingdom' agar performa mirip notebook dan tidak out of memory.
+    """
+    # 1. Filter Data
+    basket_data = df_raw[df_raw['Country'] == 'United Kingdom']
+    
+    # 2. Pivot Data
+    basket = (basket_data.groupby(['InvoiceNo', 'Description'])['Quantity']
+              .sum().unstack().reset_index().fillna(0)
+              .set_index('InvoiceNo'))
+    
+    # 3. Encoding (0 atau 1)
+    def encode_units(x):
+        return 1 if x >= 1 else 0
+    basket_sets = basket.applymap(encode_units)
+    
+    # Hapus POSTAGE
+    if 'POSTAGE' in basket_sets.columns:
+        basket_sets.drop('POSTAGE', inplace=True, axis=1)
+    
+    # 4. Apriori
+    frequent_itemsets = apriori(basket_sets, min_support=min_support, use_colnames=True)
+    
+    if frequent_itemsets.empty:
+        return pd.DataFrame()
+        
+    rules = association_rules(frequent_itemsets, metric="lift", min_threshold=min_lift)
+    
+    # Clean output (frozenset -> string)
+    rules["antecedents"] = rules["antecedents"].apply(lambda x: list(x)[0])
+    rules["consequents"] = rules["consequents"].apply(lambda x: list(x)[0])
+    
+    return rules.sort_values('lift', ascending=False)
+
+# =============================================
+# MAIN APP
 # =============================================
 def main():
     st.title("🛒 Sistem DSS Pemilihan Produk Promosi E-Commerce")
@@ -210,409 +210,229 @@ def main():
     st.sidebar.markdown("### Upload Dataset")
     
     uploaded_file = st.sidebar.file_uploader(
-        "Upload file CSV dari Kaggle",
-        type=['csv'],
-        help="Dataset harus berisi kolom: InvoiceNo, StockCode, Description, Quantity, UnitPrice, CustomerID, InvoiceDate, Country"
+        "Upload file CSV (Online Retail)",
+        type=['csv', 'xlsx'],
+        help="Dataset harus berisi kolom: InvoiceNo, StockCode, Description, Quantity, UnitPrice, CustomerID"
     )
     
     if uploaded_file is not None:
-        # Load dan preprocess data
-        with st.spinner("Memuat dan memproses data..."):
-            df = load_and_preprocess_data(uploaded_file)
-            product_metrics = calculate_product_metrics(df)
+        # --- 1. LOAD & PROCESS ---
+        with st.spinner("Memuat dan memproses data (Feature Engineering)..."):
+            df_raw, df_products = load_and_process_data(uploaded_file)
         
-        st.sidebar.success(f"✅ Data berhasil dimuat: {len(df)} transaksi, {len(product_metrics)} produk")
+        st.sidebar.success(f"✅ Data Valid: {len(df_products)} Produk")
         
-        # =============================================
-        # PENGATURAN BOBOT AHP
-        # =============================================
+        # --- 2. CLUSTERING ---
+        with st.spinner("Menjalankan K-Means Clustering..."):
+            df_clustered = perform_clustering(df_products, n_clusters=3)
+            
+        # --- SIDEBAR BOBOT AHP (SLIDER VERSION) ---
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### ⚖️ Bobot Kriteria AHP")
-        st.sidebar.info("Total bobot harus = 100%")
+        st.sidebar.markdown("### ⚖️ Bobot Preferensi (AHP)")
+        st.sidebar.info("Geser slider untuk menentukan prioritas kriteria.")
         
-        weight_revenue = st.sidebar.slider("Total Sales/Revenue", 0, 100, 40, 5)
-        weight_frequency = st.sidebar.slider("Frekuensi Pembelian", 0, 100, 25, 5)
-        weight_profit = st.sidebar.slider("Margin Keuntungan", 0, 100, 25, 5)
-        weight_return = st.sidebar.slider("Tingkat Retur (Lower Better)", 0, 100, 10, 5)
+        w_revenue = st.sidebar.slider("Revenue (Uang Masuk)", 0, 10, 5, help="Seberapa penting total pendapatan?")
+        w_sales = st.sidebar.slider("Total Sales (Volume)", 0, 10, 3, help="Seberapa penting jumlah barang terjual?")
+        w_freq = st.sidebar.slider("Frequency (Keseringan)", 0, 10, 2, help="Seberapa penting produk sering dibeli?")
+        w_return = st.sidebar.slider("Return Rate (Retur)", 0, 10, 1, help="Penalti untuk produk yang sering diretur (Makin besar = Makin benci retur)")
         
-        total_weight = weight_revenue + weight_frequency + weight_profit + weight_return
+        # Hitung Total Bobot Slider
+        total_w = w_revenue + w_sales + w_freq + w_return
+        if total_w == 0: total_w = 1 # Hindari pembagian nol
         
-        if total_weight != 100:
-            st.sidebar.error(f"⚠️ Total bobot = {total_weight}%. Harus 100%!")
-        else:
-            st.sidebar.success(f"✅ Total bobot = {total_weight}%")
-        
+        # Normalisasi Bobot agar jumlahnya 1.0 (Syarat TOPSIS)
         weights = {
-            'TotalRevenue': weight_revenue / 100,
-            'OrderFrequency': weight_frequency / 100,
-            'TotalProfit': weight_profit / 100,
-            'ReturnRate': weight_return / 100
+            'Revenue': w_revenue / total_w,
+            'Total_Sales': w_sales / total_w,
+            'Frequency': w_freq / total_w,
+            'Return_Rate': w_return / total_w
         }
         
+        # Tampilkan bobot hasil normalisasi di sidebar
+        st.sidebar.markdown("#### Bobot Ternormalisasi:")
+        st.sidebar.caption(f"Revenue: {weights['Revenue']:.1%}")
+        st.sidebar.caption(f"Sales: {weights['Total_Sales']:.1%}")
+        st.sidebar.caption(f"Freq: {weights['Frequency']:.1%}")
+        st.sidebar.caption(f"Retur: {weights['Return_Rate']:.1%}")
+
+        # --- 3. TOPSIS ---
+        with st.spinner("Menghitung Ranking TOPSIS..."):
+            df_final = calculate_topsis(df_clustered, weights)
+            
+        # --- 4. BUNDLING (Background) ---
+        with st.spinner("Mencari pola bundling (Apriori)..."):
+            # Batasi data untuk demo agar cepat respons di Streamlit jika data sangat besar
+            if len(df_raw) > 50000:
+                rules_df = get_bundling_rules(df_raw.head(20000), min_support=0.015)
+            else:
+                rules_df = get_bundling_rules(df_raw, min_support=0.015)
+
         # =============================================
-        # TABS NAVIGATION
+        # TABS VISUALISASI
         # =============================================
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📊 Dashboard",
-            "🏆 Ranking TOPSIS",
-            "🔗 Association Rules",
-            "📦 Clustering",
+            "📊 Dashboard", 
+            "🏆 Ranking TOPSIS", 
+            "🔗 Association Rules", 
+            "📦 Clustering", 
             "📈 Analisis Detail"
         ])
         
-        # =============================================
-        # TAB 1: DASHBOARD
-        # =============================================
+        # --- TAB 1: DASHBOARD ---
         with tab1:
             st.header("📊 Dashboard Overview")
             
-            # Summary metrics
+            # Metrics Row
             col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric(
-                    "Total Produk",
-                    f"{len(product_metrics)}",
-                    help="Jumlah produk yang dianalisis"
-                )
-            
-            with col2:
-                total_revenue = product_metrics['TotalRevenue'].sum()
-                st.metric(
-                    "Total Revenue",
-                    f"${total_revenue:,.0f}",
-                    help="Total pendapatan dari semua produk"
-                )
-            
-            with col3:
-                avg_order_freq = product_metrics['OrderFrequency'].mean()
-                st.metric(
-                    "Avg Order Frequency",
-                    f"{avg_order_freq:.0f}",
-                    help="Rata-rata frekuensi pembelian per produk"
-                )
-            
-            with col4:
-                avg_return = product_metrics['ReturnRate'].mean()
-                st.metric(
-                    "Avg Return Rate",
-                    f"{avg_return:.1f}%",
-                    help="Rata-rata tingkat retur produk"
-                )
+            col1.metric("Total Produk", len(df_final))
+            col2.metric("Total Revenue", f"${df_final['Revenue'].sum():,.0f}")
+            col3.metric("Rata-rata Order", f"{df_final['Frequency'].mean():.0f}")
+            col4.metric("Rata-rata Retur", f"{df_final['Return_Rate'].mean()*100:.2f}%")
             
             st.markdown("---")
             
-            # Top 10 Products by Revenue
-            col1, col2 = st.columns(2)
+            # Scatter Plot 4 Kuadran (Plotly)
+            st.subheader("Peta Posisi Produk (Sales vs Revenue)")
             
-            with col1:
-                st.subheader("Top 10 Produk - Revenue")
-                top_10_revenue = product_metrics.nlargest(10, 'TotalRevenue')
-                
-                fig = px.bar(
-                    top_10_revenue,
-                    x='TotalRevenue',
-                    y='Description',
-                    orientation='h',
-                    title='Top 10 Produk Berdasarkan Revenue',
-                    labels={'TotalRevenue': 'Revenue ($)', 'Description': 'Produk'}
-                )
-                fig.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig, use_container_width=True)
+            color_map = {
+                'High Performing': '#2ecc71', 
+                'Average Performing': '#f1c40f', 
+                'Low Performing': '#e74c3c'
+            }
             
-            with col2:
-                st.subheader("Top 10 Produk - Order Frequency")
-                top_10_freq = product_metrics.nlargest(10, 'OrderFrequency')
-                
-                fig = px.bar(
-                    top_10_freq,
-                    x='OrderFrequency',
-                    y='Description',
-                    orientation='h',
-                    title='Top 10 Produk Berdasarkan Frekuensi',
-                    labels={'OrderFrequency': 'Jumlah Order', 'Description': 'Produk'},
-                    color='OrderFrequency',
-                    color_continuous_scale='viridis'
-                )
-                fig.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # =============================================
-        # TAB 2: TOPSIS RANKING
-        # =============================================
-        with tab2:
-            st.header("🏆 Hasil Ranking TOPSIS")
-            st.info("Produk diurutkan berdasarkan skor TOPSIS yang menggabungkan semua kriteria dengan bobot yang telah ditentukan")
-            
-            if total_weight == 100:
-                # Hitung TOPSIS
-                topsis_results = calculate_topsis(product_metrics, weights)
-                
-                # Display top 5 recommendations
-                st.subheader("✅ Top 5 Rekomendasi Produk untuk Promosi")
-                
-                top_5 = topsis_results.head(5)
-                
-                for idx, row in top_5.iterrows():
-                    with st.expander(f"#{int(row['Rank'])} - {row['StockCode']}: {row['Description']}", expanded=True):
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        with col1:
-                            st.metric("TOPSIS Score", f"{row['TOPSIS_Score']:.4f}")
-                        with col2:
-                            st.metric("Revenue", f"${row['TotalRevenue']:,.0f}")
-                        with col3:
-                            st.metric("Order Frequency", f"{int(row['OrderFrequency'])}")
-                        with col4:
-                            st.metric("Return Rate", f"{row['ReturnRate']:.1f}%")
-                
-                st.markdown("---")
-                
-                # Full ranking table
-                st.subheader("📋 Tabel Lengkap Ranking Produk")
-                
-                display_columns = ['Rank', 'StockCode', 'Description', 'TOPSIS_Score', 
-                                   'TotalRevenue', 'OrderFrequency', 'TotalProfit', 'ReturnRate']
-                
-                display_df = topsis_results[display_columns].copy()
-                display_df['TotalRevenue'] = display_df['TotalRevenue'].apply(lambda x: f"${x:,.0f}")
-                display_df['TotalProfit'] = display_df['TotalProfit'].apply(lambda x: f"${x:,.0f}")
-                display_df['TOPSIS_Score'] = display_df['TOPSIS_Score'].apply(lambda x: f"{x:.4f}")
-                display_df['ReturnRate'] = display_df['ReturnRate'].apply(lambda x: f"{x:.1f}%")
-                
-                st.dataframe(display_df, use_container_width=True, height=400)
-                
-                # Download button
-                csv = topsis_results.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Hasil TOPSIS (CSV)",
-                    data=csv,
-                    file_name="topsis_ranking.csv",
-                    mime="text/csv"
-                )
-                
-                # Visualisasi TOPSIS Score
-                st.subheader("📊 Visualisasi TOPSIS Score")
-                
-                fig = px.bar(
-                    topsis_results.head(20),
-                    x='TOPSIS_Score',
-                    y='Description',
-                    orientation='h',
-                    title='Top 20 Produk Berdasarkan TOPSIS Score',
-                    labels={'TOPSIS_Score': 'TOPSIS Score', 'Description': 'Produk'},
-                    color='TOPSIS_Score',
-                    color_continuous_scale='blues'
-                )
-                fig.update_layout(height=600, yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig, use_container_width=True)
-                
-            else:
-                st.error("⚠️ Silakan atur bobot kriteria di sidebar hingga total = 100%")
-        
-        # =============================================
-        # TAB 3: ASSOCIATION RULES
-        # =============================================
-        with tab3:
-            st.header("🔗 Association Rule Mining")
-            st.info("Menemukan pola produk yang sering dibeli bersamaan untuk strategi bundling dan cross-selling")
-            
-            # Parameters
-            col1, col2 = st.columns(2)
-            with col1:
-                min_support = st.slider("Minimum Support", 0.001, 0.05, 0.01, 0.001)
-            with col2:
-                min_confidence = st.slider("Minimum Confidence", 0.1, 0.9, 0.3, 0.05)
-            
-            with st.spinner("Menjalankan Apriori Algorithm..."):
-                rules, frequent_itemsets = perform_association_analysis(df, min_support, min_confidence)
-            
-            if len(rules) > 0:
-                st.success(f"✅ Ditemukan {len(rules)} association rules")
-                
-                # Top 10 Rules
-                st.subheader("Top 10 Association Rules")
-                
-                top_rules = rules.head(10).copy()
-                top_rules['antecedents'] = top_rules['antecedents'].apply(lambda x: ', '.join(list(x)))
-                top_rules['consequents'] = top_rules['consequents'].apply(lambda x: ', '.join(list(x)))
-                
-                display_rules = top_rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']].copy()
-                display_rules.columns = ['Produk A', 'Produk B', 'Support', 'Confidence', 'Lift']
-                display_rules['Support'] = display_rules['Support'].apply(lambda x: f"{x:.4f}")
-                display_rules['Confidence'] = display_rules['Confidence'].apply(lambda x: f"{x:.4f}")
-                display_rules['Lift'] = display_rules['Lift'].apply(lambda x: f"{x:.2f}")
-                
-                st.dataframe(display_rules, use_container_width=True)
-                
-                # Rekomendasi Bundling
-                st.subheader("💡 Rekomendasi Bundling Produk")
-                
-                for idx, row in top_rules.head(5).iterrows():
-                    antecedents = ', '.join(list(rules.loc[idx, 'antecedents']))
-                    consequents = ', '.join(list(rules.loc[idx, 'consequents']))
-                    
-                    st.markdown(f"""
-                    **Bundle #{idx+1}:**  
-                    🛍️ **Produk A:** {antecedents}  
-                    🛍️ **Produk B:** {consequents}  
-                    📊 **Confidence:** {row['confidence']:.2%} | **Lift:** {row['lift']:.2f}  
-                    💡 *Ketika pelanggan membeli {antecedents}, ada {row['confidence']:.1%} kemungkinan mereka juga membeli {consequents}*
-                    """)
-                    st.markdown("---")
-                  
-            else:
-                st.warning("⚠️ Tidak ditemukan association rules dengan parameter yang ditentukan. Coba turunkan minimum support/confidence.")
-        
-        # =============================================
-        # TAB 4: CLUSTERING
-        # =============================================
-        with tab4:
-            st.header("📦 K-Means Clustering")
-            st.info("Mengelompokkan produk berdasarkan performa untuk strategi promosi yang berbeda")
-            
-            n_clusters = 3
-            
-            with st.spinner("Melakukan clustering..."):
-                clustered_df, kmeans_model = perform_clustering(product_metrics, n_clusters)
-            
-            st.success(f"✅ Produk berhasil dikelompokkan ke dalam {n_clusters} cluster")
-            
-            # Cluster distribution
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
-                st.subheader("Distribusi Cluster")
-                cluster_counts = clustered_df['ClusterLabel'].value_counts()
-                
-                fig = px.pie(
-                    values=cluster_counts.values,
-                    names=cluster_counts.index,
-                    title='Distribusi Produk per Cluster'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                st.subheader("Karakteristik Cluster")
-                cluster_summary = clustered_df.groupby('ClusterLabel').agg({
-                    'TotalRevenue': 'mean',
-                    'OrderFrequency': 'mean',
-                    'TotalProfit': 'mean',
-                    'ReturnRate': 'mean'
-                }).round(2)
-                
-                cluster_summary.columns = ['Avg Revenue', 'Avg Frequency', 'Avg Profit', 'Avg Return %']
-                st.dataframe(cluster_summary, use_container_width=True)
-            
-            # Cluster details
-            st.subheader("Detail Produk per Cluster")
-            
-            for cluster_id in sorted(clustered_df['Cluster'].unique()):
-                cluster_data = clustered_df[clustered_df['Cluster'] == cluster_id]
-                cluster_label = cluster_data['ClusterLabel'].iloc[0]
-                
-                with st.expander(f"📦 {cluster_label} ({len(cluster_data)} produk)"):
-                    st.dataframe(
-                        cluster_data[['StockCode', 'Description', 'TotalRevenue', 
-                                      'OrderFrequency', 'ReturnRate']].head(10),
-                        use_container_width=True
-                    )
-                    
-                    if cluster_id == 0:
-                        st.success("💡 Strategi: Prioritas utama untuk promosi agresif dan maintain performa")
-                    elif cluster_id == 1:
-                        st.info("💡 Strategi: Tingkatkan visibilitas dengan iklan targeted dan bundle deals")
-                    else:
-                        st.warning("💡 Strategi: Evaluasi produk, pertimbangkan diskon atau phasing out")
-        
-        # =============================================
-        # TAB 5: ANALISIS DETAIL
-        # =============================================
-        with tab5:
-            st.header("📈 Analisis Detail Produk")
-            
-            # Product selector
-            selected_product = st.selectbox(
-                "Pilih Produk untuk Analisis Detail",
-                product_metrics['Description'].tolist()
+            fig = px.scatter(
+                df_final, 
+                x='Total_Sales', 
+                y='Revenue',
+                color='Cluster_Label', 
+                color_discrete_map=color_map,
+                hover_name='Description', 
+                size='Frequency',
+                log_x=True, log_y=True, 
+                title="Segmentasi Produk: Sales vs Revenue (Ukuran = Frequency)",
+                height=500
             )
+            st.plotly_chart(fig, use_container_width=True)
             
-            product_data = product_metrics[product_metrics['Description'] == selected_product].iloc[0]
+            # Top 10 Chart
+            st.subheader("Top 10 Produk (Revenue)")
+            top_rev = df_final.nlargest(10, 'Revenue')
+            fig_bar = px.bar(top_rev, x='Revenue', y='Description', orientation='h', color='Cluster_Label', color_discrete_map=color_map)
+            fig_bar.update_layout(yaxis={'categoryorder': 'total ascending'})
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        # --- TAB 2: TOPSIS RANKING (DENGAN BUNDLING) ---
+        with tab2:
+            st.header("🏆 Rekomendasi Produk & Bundling")
+            st.info("Produk terbaik berdasarkan skor TOPSIS (Multikriteria), dilengkapi rekomendasi bundling.")
             
-            st.subheader(f"📦 {product_data['Description']}")
-            st.caption(f"Stock Code: {product_data['StockCode']}")
+            # Slider jumlah produk
+            top_n = st.slider("Tampilkan Top N Produk:", 5, 50, 10)
+            top_products = df_final.head(top_n)
             
-            # Metrics
-            col1, col2, col3, col4 = st.columns(4)
+            for i, row in top_products.iterrows():
+                # Expander untuk setiap produk
+                with st.expander(f"#{int(row['Rank'])} - {row['Description']} (Skor: {row['TOPSIS_Score']:.4f})", expanded=(i==0)):
+                    # Metrik Utama
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Revenue", f"${row['Revenue']:,.0f}")
+                    c2.metric("Total Sales", f"{row['Total_Sales']:,.0f}")
+                    c3.metric("Kategori", row['Cluster_Label'])
+                    c4.metric("Return Rate", f"{row['Return_Rate']*100:.2f}%")
+                    
+                    # Fitur Bundling
+                    st.markdown("**🎁 Rekomendasi Bundling:**")
+                    
+                    if not rules_df.empty:
+                        # Cari aturan dimana produk ini adalah antecedent
+                        my_rules = rules_df[rules_df['antecedents'] == row['Description']]
+                        
+                        if not my_rules.empty:
+                            best = my_rules.iloc[0]
+                            st.success(f"🔥 **Best Bundle:** Jual bersama **{best['consequents']}**")
+                            st.caption(f"Lift: {best['lift']:.2f}x (Hubungan sangat kuat), Confidence: {best['confidence']*100:.1f}%")
+                            
+                            # Tampilkan opsi lain jika ada
+                            if len(my_rules) > 1:
+                                st.markdown("Opsi lainnya:")
+                                for _, rule_row in my_rules.iloc[1:4].iterrows():
+                                    st.text(f"- {rule_row['consequents']} (Lift: {rule_row['lift']:.2f})")
+                        else:
+                            st.info("ℹ️ Tidak ditemukan pola bundling kuat. Produk ini cenderung dibeli secara individual.")
+                    else:
+                        st.warning("Data association rules belum tersedia.")
             
-            with col1:
-                st.metric("Total Revenue", f"${product_data['TotalRevenue']:,.0f}")
-            with col2:
-                st.metric("Order Frequency", f"{int(product_data['OrderFrequency'])}")
-            with col3:
-                st.metric("Total Profit", f"${product_data['TotalProfit']:,.0f}")
-            with col4:
-                st.metric("Return Rate", f"{product_data['ReturnRate']:.1f}%")
+            # Download Button
+            csv = df_final.to_csv(index=False)
+            st.download_button("📥 Download Laporan Lengkap (CSV)", csv, "hasil_dss_topsis.csv", "text/csv")
+
+        # --- TAB 3: ASSOCIATION RULES (FULL TABLE) ---
+        with tab3:
+            st.header("🔗 Semua Pola Belanja (Apriori)")
+            st.caption("Daftar lengkap aturan asosiasi yang ditemukan dari data transaksi.")
             
-            # Performance comparison
-            st.subheader("Perbandingan dengan Produk Lain")
+            if not rules_df.empty:
+                st.dataframe(
+                    rules_df[['antecedents', 'consequents', 'support', 'confidence', 'lift']].head(100), 
+                    use_container_width=True
+                )
+            else:
+                st.warning("Tidak ditemukan aturan asosiasi yang memenuhi syarat support/lift.")
+
+        # --- TAB 4: CLUSTERING DETAIL ---
+        with tab4:
+            st.header("📦 Detail Cluster")
             
-            metrics_comparison = pd.DataFrame({
-                'Metric': ['Revenue', 'Frequency', 'Profit', 'Return Rate'],
-                'Product Value': [
-                    product_data['TotalRevenue'],
-                    product_data['OrderFrequency'],
-                    product_data['TotalProfit'],
-                    product_data['ReturnRate']
-                ],
-                'Average Value': [
-                    product_metrics['TotalRevenue'].mean(),
-                    product_metrics['OrderFrequency'].mean(),
-                    product_metrics['TotalProfit'].mean(),
-                    product_metrics['ReturnRate'].mean()
-                ]
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                fig_pie = px.pie(df_final, names='Cluster_Label', title='Proporsi Jumlah Produk', 
+                                color='Cluster_Label', color_discrete_map=color_map)
+                st.plotly_chart(fig_pie, use_container_width=True)
+            with c2:
+                st.write("#### Statistik Rata-rata per Cluster")
+                summary = df_final.groupby('Cluster_Label')[['Total_Sales', 'Frequency', 'Revenue', 'Return_Rate']].mean().reset_index()
+                st.dataframe(summary, use_container_width=True)
+            
+            # Boxplot Distribusi
+            st.write("#### Distribusi Revenue per Kategori")
+            fig_box = px.box(df_final, x='Cluster_Label', y='Revenue', color='Cluster_Label', 
+                             color_discrete_map=color_map, log_y=True)
+            st.plotly_chart(fig_box, use_container_width=True)
+
+        # --- TAB 5: ANALISIS DETAIL ---
+        with tab5:
+            st.header("📈 Cek Produk Spesifik")
+            
+            selected_prod = st.selectbox("Pilih Produk:", df_final['Description'].unique())
+            prod_data = df_final[df_final['Description'] == selected_prod].iloc[0]
+            
+            # Tampilkan Data Raw
+            st.json({
+                "Description": prod_data['Description'],
+                "Cluster": prod_data['Cluster_Label'],
+                "TOPSIS Rank": int(prod_data['Rank']),
+                "Total Sales": prod_data['Total_Sales'],
+                "Revenue": prod_data['Revenue'],
+                "Return Rate": f"{prod_data['Return_Rate']*100:.2f}%"
             })
             
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                name='Produk Ini',
-                x=metrics_comparison['Metric'],
-                y=metrics_comparison['Product Value']
-            ))
-            fig.add_trace(go.Bar(
-                name='Rata-rata',
-                x=metrics_comparison['Metric'],
-                y=metrics_comparison['Average Value']
-            ))
+            # Perbandingan dengan Rata-rata Toko
+            avg_data = df_final[['Revenue', 'Frequency', 'Total_Sales']].mean()
             
-            fig.update_layout(
-                title='Perbandingan Performa Produk',
-                barmode='group',
-                yaxis_title='Nilai'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            comp_df = pd.DataFrame({
+                'Metric': ['Revenue', 'Frequency', 'Total Sales'],
+                'Produk Ini': [prod_data['Revenue'], prod_data['Frequency'], prod_data['Total_Sales']],
+                'Rata-rata Toko': [avg_data['Revenue'], avg_data['Frequency'], avg_data['Total_Sales']]
+            })
             
-            # Sales trend (jika ada data temporal)
-            st.subheader("Trend Penjualan")
-            product_sales = df[df['Description'] == selected_product].copy()
-            product_sales['YearMonth'] = product_sales['InvoiceDate'].dt.to_period('M').astype(str)
-            
-            monthly_sales = product_sales.groupby('YearMonth').agg({
-                'Quantity': 'sum',
-                'TotalPrice': 'sum'
-            }).reset_index()
-            
-            fig = px.line(
-                monthly_sales,
-                x='YearMonth',
-                y='TotalPrice',
-                title=f'Trend Penjualan Bulanan - {selected_product}',
-                labels={'YearMonth': 'Bulan', 'TotalPrice': 'Total Penjualan ($)'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
+            fig_comp = px.bar(comp_df, x='Metric', y=['Produk Ini', 'Rata-rata Toko'], barmode='group',
+                              title="Perbandingan Performa vs Rata-rata")
+            st.plotly_chart(fig_comp, use_container_width=True)
+
     else:
-        # Landing page
+        # =============================================
+        # LANDING PAGE (PENJELASAN AWAL DIKEMBALIKAN)
+        # =============================================
         st.info("👆 Silakan upload dataset CSV di sidebar untuk memulai analisis")
         
         st.markdown("""
@@ -626,13 +446,13 @@ def main():
         - **K-Means Clustering**: Mengelompokkan produk berdasarkan performa penjualan
         
         ### 🎯 Metode Decision Support System (DSS)
-        - **AHP (Analytic Hierarchy Process)**: Menentukan bobot kepentingan kriteria
+        - **AHP (Analytic Hierarchy Process)**: Menentukan bobot kepentingan kriteria (via Slider Preferensi)
         - **TOPSIS**: Memberikan ranking produk berdasarkan kedekatan dengan solusi ideal
         
         ### 📊 Kriteria Penilaian
         1. **Total Sales/Revenue**: Total pendapatan dari produk
         2. **Order Frequency**: Seberapa sering produk dipesan
-        3. **Profit Margin**: Keuntungan yang dihasilkan
+        3. **Total Sales (Qty)**: Jumlah barang yang terjual
         4. **Return Rate**: Tingkat pengembalian produk (semakin rendah semakin baik)
         
         ### 📁 Format Dataset
@@ -682,7 +502,7 @@ def main():
             ```
             1. Define Criteria
                ↓
-            2. AHP Weight Assignment
+            2. Preferensi Weight (Slider)
                ↓
             3. Data Normalization
                ↓
