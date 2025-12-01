@@ -29,7 +29,7 @@ st.markdown("""
     /* Mengubah warna font pada metric value */
     div[data-testid="stMetricValue"] {
         font-size: 24px;
-        color: #2c3e50; /* Darker text - ini akan bekerja di Light Theme */
+        color: #2c3e50;
     }
     
     /* Mengubah warna font pada Nilai Metrik (angka besar) */
@@ -85,14 +85,13 @@ def load_and_process_data(file):
     # 5. Filter: Hanya produk yang pernah terjual (Sales > 0)
     df_products = df_products[df_products['Total_Sales'] > 0]
     
-    # Filter tambahan untuk kestabilan statistik (Opsional, agar tidak ada produk terjual 1x)
-    # Di notebook kita pakai semua > 0, tapi untuk aplikasi sebaiknya minimal 3-5 kali terjual agar valid
+    # Filter tambahan untuk kestabilan statistik
     df_products = df_products[df_products['Frequency'] >= 3]
     
     return df, df_products
 
 # =============================================
-# 2. FUNGSI CLUSTERING (Sesuai Notebook: K-Means + Auto Label)
+# 2. FUNGSI CLUSTERING (K-Means + Auto Label)
 # =============================================
 @st.cache_data
 def perform_clustering(df, n_clusters=3):
@@ -128,11 +127,11 @@ def perform_clustering(df, n_clusters=3):
     return df_clus
 
 # =============================================
-# 3. FUNGSI TOPSIS (Sesuai Notebook)
+# 3. FUNGSI TOPSIS
 # =============================================
 def calculate_topsis(df, weights_dict):
     """
-    Menghitung skor TOPSIS menggunakan bobot (dari Slider).
+    Menghitung skor TOPSIS menggunakan bobot langsung (dari Slider).
     """
     final_df = df.copy()
     
@@ -242,10 +241,10 @@ def main():
         with st.spinner("Menjalankan K-Means Clustering..."):
             df_clustered = perform_clustering(df_products, n_clusters=3)
             
-        # --- SIDEBAR BOBOT AHP (SLIDER VERSION) ---
+        # --- SIDEBAR BOBOT (DIRECT WEIGHTING) ---
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### ⚖️ Bobot Preferensi (AHP)")
-        st.sidebar.info("Geser slider untuk menentukan prioritas kriteria.")
+        st.sidebar.markdown("### ⚖️ Konfigurasi Bobot Kriteria")
+        st.sidebar.info("Geser slider untuk menentukan prioritas kriteria secara manual.")
         
         # Penggunaan Key untuk memastikan slider punya identitas unik
         w_revenue = st.sidebar.slider("Revenue (Uang Masuk) 💰", 0, 10, 5, help="Seberapa penting total pendapatan?", key='w_revenue')
@@ -268,11 +267,11 @@ def main():
         # Tampilkan bobot hasil normalisasi di sidebar
         st.sidebar.markdown("#### Bobot Ternormalisasi:")
         st.sidebar.code(f"""
-Revenue:    {weights['Revenue']:.1%}
-Sales:      {weights['Total_Sales']:.1%}
-Frequency:  {weights['Frequency']:.1%}
+Revenue:     {weights['Revenue']:.1%}
+Sales:       {weights['Total_Sales']:.1%}
+Frequency:   {weights['Frequency']:.1%}
 Return Rate: {weights['Return_Rate']:.1%}
-Total:      {(weights['Revenue'] + weights['Total_Sales'] + weights['Frequency'] + weights['Return_Rate']):.1%}
+Total:       {(weights['Revenue'] + weights['Total_Sales'] + weights['Frequency'] + weights['Return_Rate']):.1%}
         """)
 
         # --- 3. TOPSIS ---
@@ -368,7 +367,6 @@ Total:      {(weights['Revenue'] + weights['Total_Sales'] + weights['Frequency']
             
             for i, row in top_products.iterrows():
                 # Expander untuk setiap produk
-                # Penggunaan f-string dan Markdown untuk judul yang lebih menarik
                 cluster_emoji = "💎" if row['Cluster_Label'] == 'High Performing' else "🌟" if row['Cluster_Label'] == 'Average Performing' else "📉"
                 with st.expander(f"**{cluster_emoji} #{int(row['Rank'])}** | **{row['Description']}** (Cluster: **{row['Cluster_Label']}** | Skor TOPSIS: **{row['TOPSIS_Score']:.4f}**)", expanded=(i==0)):
                     
@@ -547,8 +545,7 @@ Total:      {(weights['Revenue'] + weights['Total_Sales'] + weights['Frequency']
 
     else:
         # =============================================
-        # LANDING PAGE (PENJELASAN AWAL DIKEMBALIKAN)
-        # (Beberapa pemformatan dipercantik)
+        # LANDING PAGE (DENGAN TEKS YANG SUDAH DIEDIT)
         # =============================================
         st.info("👆 Silakan upload dataset CSV/XLSX di sidebar untuk memulai analisis")
         
@@ -563,7 +560,7 @@ Total:      {(weights['Revenue'] + weights['Total_Sales'] + weights['Frequency']
         * **K-Means Clustering**: Mengelompokkan produk berdasarkan performa penjualan (Revenue, Sales, Frequency, Return Rate).
         
         ### 🎯 Metode Decision Support System (DSS)
-        * **AHP (Analytic Hierarchy Process) Sederhana**: Menentukan bobot kepentingan kriteria (via Slider Preferensi).
+        * **Pembobotan Langsung (Direct Weighting)**: Menentukan tingkat kepentingan kriteria secara manual via Slider.
         * **TOPSIS (Technique for Order Preference by Similarity to Ideal Solution)**: Memberikan ranking produk berdasarkan kedekatan dengan solusi ideal.
         
         ### 📊 Kriteria Penilaian
@@ -579,7 +576,7 @@ Total:      {(weights['Revenue'] + weights['Total_Sales'] + weights['Frequency']
         
         ### 🚀 Cara Menggunakan
         1. Upload file CSV/XLSX melalui sidebar.
-        2. Atur **Bobot Preferensi** (Revenue, Sales, dll.) sesuai prioritas bisnis Anda di sidebar.
+        2. Atur **Konfigurasi Bobot** (Revenue, Sales, dll.) sesuai prioritas bisnis Anda di sidebar.
         3. Jelajahi hasil analisis di tab **"Rekomendasi TOPSIS"** untuk produk terbaik dan saran bundling.
         
         ---
@@ -588,30 +585,51 @@ Total:      {(weights['Revenue'] + weights['Total_Sales'] + weights['Frequency']
         """)
         
         # Tampilkan preview metodologi
+        st.markdown("---")
+        st.subheader("🛠️ Arsitektur Sistem")
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown("""
-            ### 🔍 Data Mining Workflow
-            ```mermaid
-            graph TD
-                A[Data Load & Clean] --> B(Feature Engineering: RFM-like);
-                B --> C(K-Means Clustering);
-                A --> D(Apriori: Market Basket);
-                C & D --> E(Insight Generation);
-            ```
-            """, unsafe_allow_html=True)
+            st.markdown("### 🔍 Data Mining Workflow")
+            st.graphviz_chart("""
+            digraph {
+                rankdir=TB;
+                node [shape=box, style="filled,rounded", fillcolor="#e3f2fd", fontname="Arial"];
+                edge [color="#90caf9"];
+                
+                A [label="Data Load & Clean"];
+                B [label="Feature Engineering\n(RFM-like)"];
+                C [label="K-Means Clustering\n(Segmentation)"];
+                D [label="Apriori\n(Market Basket Analysis)"];
+                E [label="Insight Generation\n(Rekomendasi)"];
+
+                A -> B;
+                B -> C;
+                A -> D;
+                C -> E;
+                D -> E;
+            }
+            """)
         
         with col2:
-            st.markdown("""
-            ### 🎯 DSS Workflow
-            ```mermaid
-            graph TD
-                A[Product Features] --> B{Bobot Preferensi (Slider)};
-                B --> C[TOPSIS Calculation];
-                C --> D(Final Product Ranking);
-            ```
-            """, unsafe_allow_html=True)
+            st.markdown("### 🎯 DSS Workflow")
+            st.graphviz_chart("""
+            digraph {
+                rankdir=TB;
+                node [shape=box, style="filled,rounded", fillcolor="#fff9c4", fontname="Arial"];
+                edge [color="#ffe082"];
+                
+                A [label="Product Features\n(Data Produk)"];
+                B [label="Bobot Kriteria\n(Slider User)"];
+                C [label="TOPSIS Calculation\n(Perhitungan Jarak)"];
+                D [label="Final Product\nRanking"];
+
+                A -> C;
+                B -> C;
+                C -> D;
+            }
+            """)
 
 if __name__ == "__main__":
     main()
