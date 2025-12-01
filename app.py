@@ -8,7 +8,7 @@ from sklearn.preprocessing import MinMaxScaler
 from mlxtend.frequent_patterns import apriori, association_rules
 import warnings
 
-# Matikan warning agar tampilan bersih
+# Matikan warning agar tampilan bersih 
 warnings.filterwarnings('ignore')
 
 # =============================================
