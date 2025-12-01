@@ -336,25 +336,6 @@ def main():
                 )
                 fig.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
                 st.plotly_chart(fig, use_container_width=True)
-            
-            # Scatter plot: Revenue vs Return Rate
-            st.subheader("Revenue vs Return Rate Analysis")
-            fig = px.scatter(
-                product_metrics,
-                x='TotalRevenue',
-                y='ReturnRate',
-                size='OrderFrequency',
-                color='TotalProfit',
-                hover_data=['Description', 'StockCode'],
-                title='Analisis Revenue vs Return Rate',
-                labels={
-                    'TotalRevenue': 'Total Revenue ($)',
-                    'ReturnRate': 'Return Rate (%)',
-                    'TotalProfit': 'Total Profit ($)'
-                },
-                color_continuous_scale='RdYlGn'
-            )
-            st.plotly_chart(fig, use_container_width=True)
         
         # =============================================
         # TAB 2: TOPSIS RANKING
@@ -479,22 +460,7 @@ def main():
                     💡 *Ketika pelanggan membeli {antecedents}, ada {row['confidence']:.1%} kemungkinan mereka juga membeli {consequents}*
                     """)
                     st.markdown("---")
-                
-                # Visualization
-                st.subheader("📊 Visualisasi Association Rules")
-                
-                fig = px.scatter(
-                    rules.head(50),
-                    x='support',
-                    y='confidence',
-                    size='lift',
-                    color='lift',
-                    title='Association Rules: Support vs Confidence',
-                    labels={'support': 'Support', 'confidence': 'Confidence', 'lift': 'Lift'},
-                    color_continuous_scale='viridis'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-                
+                  
             else:
                 st.warning("⚠️ Tidak ditemukan association rules dengan parameter yang ditentukan. Coba turunkan minimum support/confidence.")
         
@@ -505,7 +471,7 @@ def main():
             st.header("📦 K-Means Clustering")
             st.info("Mengelompokkan produk berdasarkan performa untuk strategi promosi yang berbeda")
             
-            n_clusters = st.slider("Jumlah Cluster", 2, 5, 3)
+            n_clusters = 3
             
             with st.spinner("Melakukan clustering..."):
                 clustered_df, kmeans_model = perform_clustering(product_metrics, n_clusters)
@@ -537,25 +503,6 @@ def main():
                 
                 cluster_summary.columns = ['Avg Revenue', 'Avg Frequency', 'Avg Profit', 'Avg Return %']
                 st.dataframe(cluster_summary, use_container_width=True)
-            
-            # 3D Scatter plot
-            st.subheader("Visualisasi 3D Clustering")
-            
-            fig = px.scatter_3d(
-                clustered_df,
-                x='TotalRevenue',
-                y='OrderFrequency',
-                z='TotalProfit',
-                color='ClusterLabel',
-                hover_data=['Description', 'StockCode'],
-                title='3D Visualization of Product Clusters',
-                labels={
-                    'TotalRevenue': 'Revenue ($)',
-                    'OrderFrequency': 'Order Frequency',
-                    'TotalProfit': 'Total Profit ($)'
-                }
-            )
-            st.plotly_chart(fig, use_container_width=True)
             
             # Cluster details
             st.subheader("Detail Produk per Cluster")
